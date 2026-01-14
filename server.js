@@ -84,10 +84,15 @@ async function fetchCampaigns(pool) {
   return result.recordset || [];
 }
 
-async function fetchLogsForCampaign(campaignId) {
+function parseTotalItemsCount(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function fetchLogsForCampaign(campaignId, skip, limit) {
   const url = new URL(`/campaigns/${campaignId}/logs`, config.api.baseUrl);
-  url.searchParams.set('skip', String(config.api.skip));
-  url.searchParams.set('limit', String(config.api.limit));
+  url.searchParams.set('skip', String(skip));
+  url.searchParams.set('limit', String(limit));
 
   const res = await fetch(url.toString(), {
     method: 'GET',
@@ -213,10 +218,30 @@ async function runOnce() {
         if (!campaignId) {
           throw new Error('Campaign missing id');
         }
-        const root = await fetchLogsForCampaign(campaignId);
-        const mapped = mapLogs(root);
-        const inserted = await insertLogs(pool, mapped);
-        status.logsInserted += inserted;
+        const limit = config.api.limit;
+        let skip = config.api.skip;
+        let totalItemsCount = null;
+
+        while (true) {
+          const root = await fetchLogsForCampaign(campaignId, skip, limit);
+          if (totalItemsCount === null) {
+            totalItemsCount = parseTotalItemsCount(root?.totalItemsCount);
+          }
+          const mapped = mapLogs(root);
+          const pageCount = mapped.length;
+          if (pageCount === 0) {
+            break;
+          }
+          const inserted = await insertLogs(pool, mapped);
+          status.logsInserted += inserted;
+          skip += pageCount;
+          if (totalItemsCount !== null && skip >= totalItemsCount) {
+            break;
+          }
+          if (totalItemsCount === null && pageCount < limit) {
+            break;
+          }
+        }
       } catch (err) {
         runHadError = true;
         status.lastError = `Campaign ${campaignId} failed: ${err.message}`;
